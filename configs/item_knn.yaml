@@ -1,0 +1,9 @@
+model: item_knn
+data:
+  train_path: data/processed/retailrocket/train.parquet
+  val_path: data/processed/retailrocket/val.parquet
+dataset: retailrocket
+eval:
+  k: 10
+hyperparameters:
+  neighborhood_size: 100 # A6 search space is 10-500 log-scale; fixed default for this initial run

@@ -1,0 +1,21 @@
+model: xgboost_raw
+feature_set: raw
+data:
+  train_path: data/processed/retailrocket/train.parquet
+  val_path: data/processed/retailrocket/val.parquet
+dataset: retailrocket
+eval:
+  k: 10
+candidate_generation:
+  item_knn_neighborhood_size: 100
+  n_candidates: 100 # karar-notu Katman-2: Item-KNN -> top-100 aday
+training:
+  negatives_per_positive: 9 # standard LTR negative subsampling for the ~709k-prefix train set; NOT applied at eval time
+  random_seed: 42
+optuna:
+  n_trials: 20 # A6 locked budget, per model, non-negotiable
+  search_val_sample_sessions: 2000 # subsample of val sessions for fast per-trial scoring; final report uses full val
+  search_space:
+    max_depth: { low: 3, high: 10 }
+    n_estimators: { low: 100, high: 500 }
+    learning_rate: { low: 0.01, high: 0.3, log: true }

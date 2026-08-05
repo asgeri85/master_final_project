@@ -1,0 +1,7 @@
+model: pop
+data:
+  train_path: data/processed/retailrocket/train.parquet
+  val_path: data/processed/retailrocket/val.parquet
+dataset: retailrocket
+eval:
+  k: 10

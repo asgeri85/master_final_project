@@ -1,0 +1,25 @@
+dataset:
+  name: retailrocket
+  raw_events_path: data/raw/retailrocket/events.csv
+  processed_dir: data/processed/retailrocket
+
+session:
+  event_filter: view # A0 (assumption confirmed with user): only 'view' events count as interactions
+  gap_minutes: 30 # A1
+
+filtering:
+  min_session_length: 2 # A2
+  min_item_frequency: 5 # A2
+
+split:
+  test_days: 7 # A3
+  val_days: 7 # A3
+  bucket_by: session_start # A3
+
+cold_start:
+  enabled: true # A4
+  reference_split: train
+
+io:
+  parquet_compression: snappy
+  report_path: data/processed/retailrocket/preprocessing_report.json
