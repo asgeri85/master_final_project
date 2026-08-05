@@ -1,0 +1,24 @@
+model: gru4rec
+data:
+  train_path: data/processed/retailrocket/train.parquet
+  val_path: data/processed/retailrocket/val.parquet
+dataset: retailrocket
+eval:
+  k: 10
+checkpoint_dir: null # set to the Colab Drive mount path before running there, e.g. /content/drive/MyDrive/thesis-checkpoints/gru4rec
+training:
+  batch_size: 256 # A6 fixed, not searched
+  max_seq_len: 50 # A6 fixed, not searched
+  max_epochs: 50 # safety cap; early stopping (patience) expected to trigger first
+  patience: 5 # A6 fixed: early stopping on val NDCG@10
+  random_seed: 42 # seed for the one-time Optuna search
+  seeds: [42, 43, 44, 45, 46] # 5 seeds for final training + mean±std reporting (CLAUDE.md rule 9)
+  device: null # null -> auto (cuda if available else cpu)
+optuna:
+  n_trials: 20 # A6 locked budget, per model, non-negotiable
+  search_val_sample_sessions: 2000 # subsample of val sessions for fast per-trial scoring; final report uses full val
+  search_space:
+    hidden_size: { low: 64, high: 256 }
+    num_layers: { low: 1, high: 2 }
+    dropout: { low: 0.1, high: 0.5 }
+    learning_rate: { low: 0.0001, high: 0.01, log: true }
