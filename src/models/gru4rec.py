@@ -18,6 +18,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.data import DataLoader, Dataset
 
 from src.models.pop import PopModel
 
@@ -76,15 +77,38 @@ def _iter_batches(sequences: list[np.ndarray], batch_size: int, rng: np.random.G
     order = rng.permutation(len(sequences))
     for start in range(0, len(order), batch_size):
         batch = [sequences[i] for i in order[start : start + batch_size]]
-        inputs, targets = [s[:-1] for s in batch], [s[1:] for s in batch]
-        lengths = np.array([len(s) for s in inputs], dtype=np.int64)
-        max_len = int(lengths.max())
-        x = np.zeros((len(batch), max_len), dtype=np.int64)
-        y = np.zeros((len(batch), max_len), dtype=np.int64)  # 0 = pad = ignored via mask
-        for i, (inp, tgt) in enumerate(zip(inputs, targets)):
-            x[i, : len(inp)] = inp
-            y[i, : len(tgt)] = tgt
-        yield torch.from_numpy(x), torch.from_numpy(y), torch.from_numpy(lengths)
+        yield _collate_batch(batch)
+
+
+def _collate_batch(batch: list[np.ndarray]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Pads a list of raw session index arrays into (x, y, lengths). Used both
+    as a DataLoader collate_fn (fit()'s main loop) and directly by
+    _iter_batches (the early-stopping validation proxy's own batching)."""
+    inputs, targets = [s[:-1] for s in batch], [s[1:] for s in batch]
+    lengths = np.array([len(s) for s in inputs], dtype=np.int64)
+    max_len = int(lengths.max())
+    x = np.zeros((len(batch), max_len), dtype=np.int64)
+    y = np.zeros((len(batch), max_len), dtype=np.int64)  # 0 = pad = ignored via mask
+    for i, (inp, tgt) in enumerate(zip(inputs, targets)):
+        x[i, : len(inp)] = inp
+        y[i, : len(tgt)] = tgt
+    return torch.from_numpy(x), torch.from_numpy(y), torch.from_numpy(lengths)
+
+
+class _SessionSequenceDataset(Dataset):
+    """Wraps a list of raw (unpadded) per-session index arrays for DataLoader.
+    Padding happens in _collate_batch, not here -- each item stays a variable-
+    length np.ndarray so a background worker can hand off padding/shuffling
+    to run concurrently with the GPU step of the previous batch."""
+
+    def __init__(self, sequences: list[np.ndarray]) -> None:
+        self.sequences = sequences
+
+    def __len__(self) -> int:
+        return len(self.sequences)
+
+    def __getitem__(self, idx: int) -> np.ndarray:
+        return self.sequences[idx]
 
 
 class Gru4RecModel:
@@ -101,6 +125,8 @@ class Gru4RecModel:
         seed: int = 42,
         device: str | None = None,
         checkpoint_dir: str | None = None,
+        num_workers: int = 0,
+        verbose: bool = False,
     ) -> None:
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -112,6 +138,8 @@ class Gru4RecModel:
         self.patience = patience
         self.seed = seed
         self.checkpoint_dir = checkpoint_dir
+        self.num_workers = num_workers
+        self.verbose = verbose
         self.device = torch.device(device) if device else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
@@ -124,7 +152,6 @@ class Gru4RecModel:
 
     def fit(self, train: pd.DataFrame, val: pd.DataFrame | None = None) -> None:
         torch.manual_seed(self.seed)
-        rng = np.random.default_rng(self.seed)
 
         self._pop.fit(train)
 
@@ -134,6 +161,16 @@ class Gru4RecModel:
         n_items = len(items)
 
         sequences = _build_sequences(train, self.item_to_idx, self.max_seq_len)
+        loader = DataLoader(
+            _SessionSequenceDataset(sequences),
+            batch_size=self.batch_size,
+            shuffle=True,
+            collate_fn=_collate_batch,
+            num_workers=self.num_workers,
+            pin_memory=self.device.type == "cuda",
+            persistent_workers=self.num_workers > 0,
+            generator=torch.Generator().manual_seed(self.seed),
+        )
 
         self._net = _GRU4RecNet(n_items, self.hidden_size, self.num_layers, self.dropout).to(self.device)
         optimizer = torch.optim.Adam(self._net.parameters(), lr=self.learning_rate)
@@ -151,9 +188,12 @@ class Gru4RecModel:
 
         for epoch in range(start_epoch, self.max_epochs + 1):
             self._net.train()
-            epoch_loss, n_batches = 0.0, 0
-            for x, y, lengths in _iter_batches(sequences, self.batch_size, rng):
-                x, y, lengths = x.to(self.device), y.to(self.device), lengths.to(self.device)
+            epoch_loss_sum = torch.zeros((), device=self.device)
+            n_batches = 0
+            for x, y, lengths in loader:
+                # lengths stays on CPU: pack_padded_sequence requires it there,
+                # and it is otherwise unused on-device in this loop.
+                x, y = x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
                 hidden = self._net.encode(x, lengths)
                 mask = y != PAD_IDX
@@ -161,13 +201,17 @@ class Gru4RecModel:
                 loss = F.cross_entropy(logits, y[mask])
                 loss.backward()
                 optimizer.step()
-                epoch_loss += loss.item()
+                epoch_loss_sum += loss.detach()  # accumulate on-device; sync once per epoch, not per batch
                 n_batches += 1
+            epoch_loss = (epoch_loss_sum / max(n_batches, 1)).item()
 
             val_ndcg = self._fast_val_ndcg10(val) if val is not None else None
-            self.history.append(
-                {"epoch": epoch, "train_loss": epoch_loss / max(n_batches, 1), "val_ndcg@10": val_ndcg}
-            )
+            self.history.append({"epoch": epoch, "train_loss": epoch_loss, "val_ndcg@10": val_ndcg})
+            if self.verbose:
+                msg = f"  [gru4rec seed={self.seed}] epoch {epoch}/{self.max_epochs}: train_loss={epoch_loss:.4f}"
+                if val_ndcg is not None:
+                    msg += f", val_NDCG@10={val_ndcg:.4f}"
+                print(msg, flush=True)
 
             is_best = val_ndcg is not None and val_ndcg > best_val_ndcg
             if is_best:
@@ -208,24 +252,28 @@ class Gru4RecModel:
         if not sequences:
             return 0.0
 
-        total_ndcg, n = 0.0, 0
+        total_ndcg = torch.zeros((), device=self.device)
+        n = 0
         rng = np.random.default_rng(0)  # deterministic batching order for this proxy metric
         with torch.no_grad():
             for x, y, lengths in _iter_batches(sequences, 512, rng):
-                x, y, lengths = x.to(self.device), y.to(self.device), lengths.to(self.device)
+                # lengths_gpu only for on-device indexing below; lengths itself
+                # stays on CPU for pack_padded_sequence inside encode().
+                x, y = x.to(self.device), y.to(self.device)
+                lengths_gpu = lengths.to(self.device)
                 hidden = self._net.encode(x, lengths)  # (B, T, H)
-                last_hidden = hidden[torch.arange(len(lengths), device=self.device), lengths - 1]  # (B, H)
+                last_hidden = hidden[torch.arange(len(lengths), device=self.device), lengths_gpu - 1]  # (B, H)
                 logits = self._net.project(last_hidden)  # (B, n_items+1)
-                true_idx = y[torch.arange(len(lengths), device=self.device), lengths - 1]  # (B,)
+                true_idx = y[torch.arange(len(lengths), device=self.device), lengths_gpu - 1]  # (B,)
                 topk_idx = logits.topk(k, dim=-1).indices  # (B, k)
                 hit_pos = (topk_idx == true_idx.unsqueeze(1)).nonzero()  # (n_hits, 2)
                 ndcg_per_row = torch.zeros(len(lengths), device=self.device)
                 if hit_pos.numel():
                     rows, cols = hit_pos[:, 0], hit_pos[:, 1]
                     ndcg_per_row[rows] = 1.0 / torch.log2(cols.float() + 2.0)  # rank = col+1
-                total_ndcg += ndcg_per_row.sum().item()
+                total_ndcg += ndcg_per_row.sum()  # accumulate on-device; sync once after the loop
                 n += len(lengths)
-        return total_ndcg / n
+        return (total_ndcg / n).item()
 
     def predict(self, session: Sequence[int]) -> list[int]:
         known = [item for item in session if item in self.item_to_idx]
@@ -234,7 +282,7 @@ class Gru4RecModel:
 
         known = known[-self.max_seq_len :]
         idx_seq = torch.tensor([[self.item_to_idx[i] for i in known]], dtype=torch.long, device=self.device)
-        length = torch.tensor([len(known)], dtype=torch.long, device=self.device)
+        length = torch.tensor([len(known)], dtype=torch.long)  # CPU: pack_padded_sequence needs it there
 
         self._net.eval()
         with torch.no_grad():
@@ -245,6 +293,47 @@ class Gru4RecModel:
         scores = logits[1:].cpu().numpy()  # drop pad index 0; remaining n_items align with idx_to_item
         order = np.lexsort((self.idx_to_item, -scores))  # tie-break: score desc, item id asc
         return self.idx_to_item[order].tolist()
+
+    def predict_many(self, sessions: Sequence[Sequence[int]], eval_batch_size: int = 512) -> list[list[int]]:
+        """Batched equivalent of calling predict() once per session in `sessions`,
+        in the same order, returning identical results. Exists purely so the
+        eval harness's per-session-prefix scoring can drive the GPU with a few
+        large batches instead of thousands of single-session forward passes
+        (see src/eval/run_gru4rec.py's _evaluate_fast)."""
+        results: list[list[int] | None] = [None] * len(sessions)
+        net_indices: list[int] = []
+        net_known: list[list[int]] = []
+        for i, session in enumerate(sessions):
+            known = [item for item in session if item in self.item_to_idx]
+            if not known:
+                results[i] = self._pop.predict(session)
+                continue
+            net_indices.append(i)
+            net_known.append(known[-self.max_seq_len :])
+
+        self._net.eval()
+        with torch.no_grad():
+            for start in range(0, len(net_known), eval_batch_size):
+                chunk_indices = net_indices[start : start + eval_batch_size]
+                chunk_known = net_known[start : start + eval_batch_size]
+                lengths = torch.tensor([len(k) for k in chunk_known], dtype=torch.long)  # CPU, see predict()
+                max_len = int(lengths.max())
+                x = torch.zeros((len(chunk_known), max_len), dtype=torch.long)
+                for row, known in enumerate(chunk_known):
+                    x[row, : len(known)] = torch.tensor([self.item_to_idx[i] for i in known], dtype=torch.long)
+                x = x.to(self.device)
+                lengths_gpu = lengths.to(self.device)
+
+                hidden = self._net.encode(x, lengths)  # (B, T, H)
+                last_hidden = hidden[torch.arange(len(chunk_known), device=self.device), lengths_gpu - 1]
+                logits = self._net.project(last_hidden)  # (B, n_items+1)
+                scores = logits[:, 1:].cpu().numpy()  # drop pad index 0
+
+                for row, result_idx in enumerate(chunk_indices):
+                    order = np.lexsort((self.idx_to_item, -scores[row]))
+                    results[result_idx] = self.idx_to_item[order].tolist()
+
+        return results  # type: ignore[return-value]
 
     def _maybe_resume(self, optimizer: torch.optim.Optimizer) -> dict | None:
         if self.checkpoint_dir is None:

@@ -19,7 +19,8 @@ import optuna
 import pandas as pd
 import yaml
 
-from src.eval.harness import count_eval_pairs, evaluate_model
+from src.eval.harness import count_eval_pairs, iter_eval_pairs
+from src.eval.metrics import average_at_k
 from src.models.gru4rec import Gru4RecModel
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -41,7 +42,9 @@ def _git_commit() -> str | None:
         return None
 
 
-def _build_model(config: dict, params: dict, seed: int, checkpoint_dir: str | None) -> Gru4RecModel:
+def _build_model(
+    config: dict, params: dict, seed: int, checkpoint_dir: str | None, verbose: bool = False
+) -> Gru4RecModel:
     t = config["training"]
     return Gru4RecModel(
         hidden_size=params["hidden_size"],
@@ -55,7 +58,19 @@ def _build_model(config: dict, params: dict, seed: int, checkpoint_dir: str | No
         seed=seed,
         device=t.get("device"),
         checkpoint_dir=checkpoint_dir,
+        num_workers=t.get("num_workers", 0),
+        verbose=verbose,
     )
+
+
+def _evaluate_fast(model: Gru4RecModel, split_df: pd.DataFrame, k: int) -> dict[str, float]:
+    """Same HR/NDCG/MRR@K as src.eval.harness.evaluate_model (identical
+    iter_eval_pairs/average_at_k), but drives predict_many() instead of calling
+    model.predict() once per session-prefix -- collapses tens of thousands of
+    unbatched single-session GPU forward passes into a handful of batches."""
+    contexts, true_items = zip(*iter_eval_pairs(split_df))
+    ranked_lists = model.predict_many(list(contexts))
+    return average_at_k(zip(ranked_lists, true_items), k)
 
 
 def _sample_val_sessions(val: pd.DataFrame, n: int, seed: int) -> pd.DataFrame:
@@ -69,8 +84,10 @@ def _sample_val_sessions(val: pd.DataFrame, n: int, seed: int) -> pd.DataFrame:
 def _tune(config: dict, train: pd.DataFrame, val_search: pd.DataFrame, k: int) -> tuple[dict, float]:
     space = config["optuna"]["search_space"]
     seed = config["training"]["random_seed"]
+    n_trials = config["optuna"]["n_trials"]
 
     def objective(trial: optuna.Trial) -> float:
+        trial_start = time.monotonic()
         params = {
             "hidden_size": trial.suggest_int("hidden_size", space["hidden_size"]["low"], space["hidden_size"]["high"]),
             "num_layers": trial.suggest_int("num_layers", space["num_layers"]["low"], space["num_layers"]["high"]),
@@ -79,12 +96,15 @@ def _tune(config: dict, train: pd.DataFrame, val_search: pd.DataFrame, k: int) -
                 "learning_rate", space["learning_rate"]["low"], space["learning_rate"]["high"], log=True
             ),
         }
-        model = _build_model(config, params, seed, checkpoint_dir=None)
+        model = _build_model(config, params, seed, checkpoint_dir=None, verbose=False)
         model.fit(train, val=val_search)
-        return evaluate_model(model, val_search, k=k)[f"ndcg@{k}"]
+        ndcg = _evaluate_fast(model, val_search, k=k)[f"ndcg@{k}"]
+        duration = time.monotonic() - trial_start
+        print(f"Trial {trial.number + 1}/{n_trials} bitti, NDCG@{k}={ndcg:.4f}, süre={duration:.1f}s", flush=True)
+        return ndcg
 
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed))
-    study.optimize(objective, n_trials=config["optuna"]["n_trials"])
+    study.optimize(objective, n_trials=n_trials)
     return study.best_params, study.best_value
 
 
@@ -92,14 +112,14 @@ def _train_one_seed(config: dict, train: pd.DataFrame, val: pd.DataFrame, best_p
     checkpoint_dir = None
     if config.get("checkpoint_dir"):
         checkpoint_dir = str(Path(config["checkpoint_dir"]) / f"seed_{seed}")
-    model = _build_model(config, best_params, seed, checkpoint_dir)
+    model = _build_model(config, best_params, seed, checkpoint_dir, verbose=True)
 
     fit_start = time.monotonic()
     model.fit(train, val=val)
     fit_duration = time.monotonic() - fit_start
 
     eval_start = time.monotonic()
-    metrics = evaluate_model(model, val, k=k)
+    metrics = _evaluate_fast(model, val, k=k)
     eval_duration = time.monotonic() - eval_start
 
     return {

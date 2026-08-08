@@ -58,3 +58,23 @@ def test_empty_and_oov_session_falls_back_to_pop():
 
     assert model.predict([]) == pop.predict([])
     assert model.predict([99999]) == pop.predict([99999])
+
+
+def test_predict_many_matches_predict_one_by_one():
+    # predict_many() re-implements predict()'s forward pass in a batched form
+    # purely for eval speed -- this pins down that it must never drift from
+    # calling predict() once per session, including the empty/OOV fallback path.
+    train = _tiny_train()
+    model = Gru4RecModel(
+        hidden_size=8, num_layers=1, dropout=0.1, max_epochs=2, batch_size=4, max_seq_len=5, checkpoint_dir=None
+    )
+    model.fit(train)
+
+    sessions = [[10, 11], [10], [12, 13], [], [99999], [14, 15, 10], [11]]
+    expected = [model.predict(s) for s in sessions]
+
+    # eval_batch_size smaller than len(sessions) forces multiple chunks through
+    # the batched path, exercising the same code as a real multi-thousand-pair eval.
+    actual = model.predict_many(sessions, eval_batch_size=2)
+
+    assert actual == expected

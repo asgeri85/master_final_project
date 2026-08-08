@@ -14,6 +14,11 @@ training:
   random_seed: 42 # seed for the one-time Optuna search
   seeds: [42, 43, 44, 45, 46] # 5 seeds for final training + mean±std reporting (CLAUDE.md rule 9)
   device: null # null -> auto (cuda if available else cpu)
+  num_workers: 0 # DataLoader background workers; execution setting only, not a model hyperparameter.
+    # Profiled at 0 vs 2 on 500 sessions: per-batch padding here is cheap (median
+    # session length ~2), so multiprocessing worker startup cost dominated and made
+    # 2 *slower* (macOS spawn; Colab's Linux fork is cheaper but unverified here).
+    # Bump this only after confirming it actually helps in the real Colab run.
 optuna:
   n_trials: 20 # A6 locked budget, per model, non-negotiable
   search_val_sample_sessions: 2000 # subsample of val sessions for fast per-trial scoring; final report uses full val
