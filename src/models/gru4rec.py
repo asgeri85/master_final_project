@@ -143,6 +143,7 @@ class Gru4RecModel:
         self.device = torch.device(device) if device else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
+        self.use_amp = self.device.type == "cuda"
 
         self._pop = PopModel()
         self.item_to_idx: dict[int, int] = {}
@@ -174,13 +175,14 @@ class Gru4RecModel:
 
         self._net = _GRU4RecNet(n_items, self.hidden_size, self.num_layers, self.dropout).to(self.device)
         optimizer = torch.optim.Adam(self._net.parameters(), lr=self.learning_rate)
+        scaler = torch.amp.GradScaler(device="cuda", enabled=self.use_amp)
 
         start_epoch = 1
         best_state: dict | None = None
         best_val_ndcg = -float("inf")
         epochs_without_improvement = 0
 
-        resumed = self._maybe_resume(optimizer)
+        resumed = self._maybe_resume(optimizer, scaler)
         if resumed is not None:
             start_epoch = resumed["epoch"] + 1
             best_val_ndcg = resumed.get("best_val_ndcg", best_val_ndcg)
@@ -195,12 +197,14 @@ class Gru4RecModel:
                 # and it is otherwise unused on-device in this loop.
                 x, y = x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
                 optimizer.zero_grad()
-                hidden = self._net.encode(x, lengths)
-                mask = y != PAD_IDX
-                logits = self._net.project(hidden[mask])
-                loss = F.cross_entropy(logits, y[mask])
-                loss.backward()
-                optimizer.step()
+                with torch.amp.autocast(device_type=self.device.type, enabled=self.use_amp):
+                    hidden = self._net.encode(x, lengths)
+                    mask = y != PAD_IDX
+                    logits = self._net.project(hidden[mask])
+                    loss = F.cross_entropy(logits, y[mask])
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
                 epoch_loss_sum += loss.detach()  # accumulate on-device; sync once per epoch, not per batch
                 n_batches += 1
             epoch_loss = (epoch_loss_sum / max(n_batches, 1)).item()
@@ -221,7 +225,7 @@ class Gru4RecModel:
             elif val_ndcg is not None:
                 epochs_without_improvement += 1
 
-            self._save_checkpoint(epoch, optimizer, best_val_ndcg, epochs_without_improvement, is_best)
+            self._save_checkpoint(epoch, optimizer, scaler, best_val_ndcg, epochs_without_improvement, is_best)
 
             if val is not None and epochs_without_improvement >= self.patience:
                 break
@@ -335,7 +339,7 @@ class Gru4RecModel:
 
         return results  # type: ignore[return-value]
 
-    def _maybe_resume(self, optimizer: torch.optim.Optimizer) -> dict | None:
+    def _maybe_resume(self, optimizer: torch.optim.Optimizer, scaler: torch.amp.GradScaler) -> dict | None:
         if self.checkpoint_dir is None:
             return None
         latest = Path(self.checkpoint_dir) / f"gru4rec_seed{self.seed}_latest.pt"
@@ -344,12 +348,15 @@ class Gru4RecModel:
         payload = torch.load(latest, map_location=self.device, weights_only=False)
         self._net.load_state_dict(payload["model_state_dict"])
         optimizer.load_state_dict(payload["optimizer_state_dict"])
+        if payload.get("scaler_state_dict") is not None:
+            scaler.load_state_dict(payload["scaler_state_dict"])
         return payload
 
     def _save_checkpoint(
         self,
         epoch: int,
         optimizer: torch.optim.Optimizer,
+        scaler: torch.amp.GradScaler,
         best_val_ndcg: float,
         epochs_without_improvement: int,
         is_best: bool,
@@ -363,6 +370,7 @@ class Gru4RecModel:
             "seed": self.seed,
             "model_state_dict": self._net.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            "scaler_state_dict": scaler.state_dict() if self.use_amp else None,
             "item_to_idx": self.item_to_idx,
             "idx_to_item": self.idx_to_item,
             "best_val_ndcg": best_val_ndcg,

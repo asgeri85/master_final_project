@@ -21,6 +21,7 @@ training:
     # Bump this only after confirming it actually helps in the real Colab run.
 optuna:
   n_trials: 20 # A6 locked budget, per model, non-negotiable
+  n_jobs: 1 # parallel Optuna trials; bump on Colab if GPU memory allows (e.g. 4)
   search_val_sample_sessions: 2000 # subsample of val sessions for fast per-trial scoring; final report uses full val
   search_space:
     hidden_size: { low: 64, high: 256 }

@@ -85,6 +85,7 @@ def _tune(config: dict, train: pd.DataFrame, val_search: pd.DataFrame, k: int) -
     space = config["optuna"]["search_space"]
     seed = config["training"]["random_seed"]
     n_trials = config["optuna"]["n_trials"]
+    n_jobs = config["optuna"].get("n_jobs", 1)
 
     def objective(trial: optuna.Trial) -> float:
         trial_start = time.monotonic()
@@ -104,7 +105,7 @@ def _tune(config: dict, train: pd.DataFrame, val_search: pd.DataFrame, k: int) -
         return ndcg
 
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed))
-    study.optimize(objective, n_trials=n_trials)
+    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs)
     return study.best_params, study.best_value
 
 
