@@ -1,10 +1,13 @@
-"""Fit POP/S-POP/Item-KNN on RetailRocket train, evaluate on val, log to results/runs.jsonl.
+"""Fit POP/S-POP/Item-KNN on train, evaluate on val, log to results/runs.jsonl.
 
-CLI usage: python -m src.eval.run_baselines
+CLI usage:
+  python -m src.eval.run_baselines
+  python -m src.eval.run_baselines --configs configs/pop_lsapp.yaml configs/s_pop_lsapp.yaml configs/item_knn_lsapp.yaml
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -15,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from src.eval.harness import count_eval_pairs, evaluate_model
+from src.eval.harness import count_eval_pairs, evaluate_model, evaluate_model_multi
 from src.models.item_knn import ItemKnnModel
 from src.models.pop import PopModel
 from src.models.s_pop import SPopModel
@@ -57,7 +60,6 @@ def run_one(config_path: str) -> dict:
 
     train = pd.read_parquet(config["data"]["train_path"])
     val = pd.read_parquet(config["data"]["val_path"])
-    k = config["eval"]["k"]
 
     model = _build_model(config)
 
@@ -66,7 +68,11 @@ def run_one(config_path: str) -> dict:
     fit_duration = time.monotonic() - fit_start
 
     eval_start = time.monotonic()
-    metrics = evaluate_model(model, val, k=k)
+    if "metrics" in config["eval"]:
+        specs = [(spec["name"], spec["k"]) for spec in config["eval"]["metrics"]]
+        metrics = evaluate_model_multi(model, val, specs)
+    else:
+        metrics = evaluate_model(model, val, k=config["eval"]["k"])
     eval_duration = time.monotonic() - eval_start
 
     return {
@@ -86,11 +92,17 @@ def run_one(config_path: str) -> dict:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Fit/evaluate POP, S-POP, Item-KNN, log to results/runs.jsonl")
+    parser.add_argument(
+        "--configs", nargs="+", default=MODEL_CONFIGS, help="YAML config paths to run (default: RetailRocket's 3)"
+    )
+    args = parser.parse_args()
+
     os.makedirs("results", exist_ok=True)
     runs_path = Path("results/runs.jsonl")
 
     with runs_path.open("a") as f:
-        for config_path in MODEL_CONFIGS:
+        for config_path in args.configs:
             print(f"Running {config_path} ...")
             run = run_one(config_path)
             print(f"  metrics: {run['metrics']}  (fit={run['fit_duration_seconds']}s, eval={run['eval_duration_seconds']}s)")

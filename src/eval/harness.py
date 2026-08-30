@@ -10,7 +10,7 @@ from collections.abc import Iterator
 
 import pandas as pd
 
-from src.eval.metrics import average_at_k, evaluate_pair
+from src.eval.metrics import average_at_k, average_multi, evaluate_pair
 
 
 def iter_session_prefixes(split_df: pd.DataFrame) -> Iterator[dict]:
@@ -51,6 +51,18 @@ def evaluate_model(model, split_df: pd.DataFrame, k: int = 10) -> dict[str, floa
             yield model.predict(context), true_item
 
     return average_at_k(pairs(), k)
+
+
+def evaluate_model_multi(model, split_df: pd.DataFrame, specs: list[tuple[str, int]]) -> dict[str, float]:
+    """Like `evaluate_model`, but for an arbitrary (metric_name, k) spec list --
+    e.g. LSApp's `[("hr", 1), ("hr", 3), ("mrr", 5)]` (karar-notu SS3 exception),
+    where a single shared K across HR/NDCG/MRR doesn't apply."""
+
+    def pairs():
+        for context, true_item in iter_eval_pairs(split_df):
+            yield model.predict(context), true_item
+
+    return average_multi(pairs(), specs)
 
 
 def evaluate_per_pair_and_session(

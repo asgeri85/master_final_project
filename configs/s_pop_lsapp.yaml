@@ -1,0 +1,10 @@
+model: s_pop
+data:
+  train_path: data/processed/lsapp/train.parquet
+  val_path: data/processed/lsapp/val.parquet
+dataset: lsapp
+eval:
+  metrics: # LSApp exception (docs/00-karar-notu.md SS3), see configs/pop_lsapp.yaml
+    - {name: hr, k: 1}
+    - {name: hr, k: 3}
+    - {name: mrr, k: 5}

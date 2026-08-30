@@ -1,0 +1,31 @@
+model: lstm
+data:
+  train_path: data/processed/lsapp/train.parquet
+  val_path: data/processed/lsapp/val.parquet
+dataset: lsapp
+eval:
+  metrics: # LSApp exception (docs/00-karar-notu.md SS3), see configs/pop_lsapp.yaml
+    - {name: hr, k: 1}
+    - {name: hr, k: 3}
+    - {name: mrr, k: 5}
+checkpoint_dir: null # set to the Colab Drive mount path before running there, e.g. /content/drive/MyDrive/thesis-checkpoints/lstm_lsapp
+training:
+  batch_size: 256 # A6 fixed, not searched
+  max_seq_len: 50 # A6 fixed, not searched
+  max_epochs: 50 # safety cap; early stopping (patience) expected to trigger first
+  patience: 5 # A6 fixed: early stopping on the Optuna objective metric below
+  random_seed: 42 # seed for the one-time Optuna search
+  seeds: [42, 43, 44, 45, 46] # 5 seeds for final training + mean±std reporting (CLAUDE.md rule 9)
+  device: null # null -> auto (cuda if available else cpu)
+  num_workers: 0 # see configs/lstm.yaml for the profiling note this mirrors
+optuna:
+  n_trials: 20 # A6 locked budget, per model, non-negotiable
+  n_jobs: 1 # parallel Optuna trials; bump on Colab if GPU memory allows (e.g. 4)
+  search_val_sample_sessions: 2000 # subsample of val sessions for fast per-trial scoring; final report uses full val
+  objective_metric: mrr@5 # LSApp has no ndcg@{k} in eval.metrics (see SS3 exception above),
+    # so the Optuna search target is mrr@5 instead of RetailRocket's ndcg@10
+  search_space:
+    hidden_size: { low: 64, high: 256 }
+    num_layers: { low: 1, high: 2 }
+    dropout: { low: 0.1, high: 0.5 }
+    learning_rate: { low: 0.0001, high: 0.01, log: true }

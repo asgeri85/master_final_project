@@ -116,8 +116,53 @@ on-device deneyleri için ayrıca avantaj.
 
 **Bilinen sınırı:** 87 öğelik aday uzayı. Bölüm 3'teki K düzeltmesi bu yüzden zorunlu.
 
-**Durum:** Henüz işlenmedi — Hafta 4'te ele alınacak. `lsapp.tsv` dosyasında ham tar
-header sorunu var (Hafta 1'de tespit edildi, düzeltilmesi Hafta 4'e bırakıldı).
+**Durum:** Ön işleme tamamlandı — Hafta 4, `data/processed/lsapp/{train,val,test}.parquet`.
+POP/S-POP/Item-KNN sonuçları `results/runs.jsonl`'e eklendi (`dataset: "lsapp"`).
+GRU4Rec/LSTM/SASRec configleri (`configs/{gru4rec,lstm,sasrec}_lsapp.yaml`) Colab'da
+çalıştırılmaya hazır, henüz eğitilmedi.
+
+### 4.2a LSApp ön işleme uygulaması `[TAMAMLANDI — Hafta 4]`
+
+**Tar-header teşhisi (Hafta 1'de tespit edildi):** `lsapp.tsv` aslında ham bir TSV
+değil, tek üyeli geçerli bir POSIX tar arşivi — ilk 512 byte standart tar header,
+gerçek TSV içeriği byte 512'den başlıyor (3.658.589 satır, `user_id, session_id,
+timestamp, app_name, event_type`, tab-delimited). Düzeltme diske ekstra kopya
+yazmadan `tarfile` ile stream edilerek yapıldı (`src.data.io.read_raw_events_lsapp`).
+
+**A0-LSApp — Event filtresi (kullanıcı ile netleştirildi):** Ham `event_type`
+sütununun 4 değeri var: `Opened`, `Closed`, `User Interaction`, `Broken`. RetailRocket'ın
+`event_filter: view` kararına analog olarak, LSApp'te **sadece `Opened`** satırları
+etkileşim sayıldı (bir sonraki-uygulama tahmini literatüründeki standart birim).
+Bu, ham 3.658.589 satırı 652.859'a indiriyor.
+
+**Not — makale ile satır sayısı farkı:** Makalenin bildirdiği 599.635 "olay" ile ham
+dosyadaki 3.658.589 satır arasında ~6x fark var; bu, ham logun `Opened`/`Closed`/
+`User Interaction` geçişlerini ayrı ayrı kaydetmesinden kaynaklanıyor gibi görünüyor
+(her uygulama ziyareti birden fazla satır üretiyor). `Opened`-only filtreleme sonrası
+652.859 satır, makalenin rakamına RetailRocket'taki "view"-only filtrelemeyle
+benzer bir mertebede yakın.
+
+**Oturum tanımı:** Ham `session_id` sütunu (global bir sayaç, kullanıcıya özel
+değil) kullanılmadı — RetailRocket ile tutarlılık için A1 (30 dk boşluk) ile
+`sessionize.build_sessions` tarafından sıfırdan yeniden inşa edildi.
+
+**itemid = app_name:** 87 uygulama adı, alfabetik sıralı deterministik bir eşlemeyle
+(0-86) `itemid`'e çevrildi. Eşleme `data/processed/lsapp/item_id_to_app_name.json`
+olarak saklanıyor (yorumlanabilirlik için).
+
+**Filtreleme hunisi (A1-A4 sonrası):** 652.859 satır → 15.666 oturum (2 iterasyonda
+yakınsadı) → train 571.329 satır / 13.891 oturum, val 57.379 satır / 1.254 oturum,
+test 22.187 satır / 521 oturum. Val/test'te cold-start oranı %0 (87 öğelik katalog
+zaten train'de tam kapsanıyor).
+
+**Gözlem — Item-KNN, LSApp'te POP'un altında kalıyor:** `src/models/item_knn.py`
+kendi-benzerliği kasıtlı olarak sıfırlıyor (`cooccurrence.setdiag(0)`) — RetailRocket'ta
+mantıklı bir tasarım (az önce görülen ürünü tekrar önermek anlamsız), ama LSApp'in
+baskın sinyali tam olarak bu: kullanıcı az önce kullandığı uygulamayı tekrar açıyor.
+S-POP bunu doğrudan yakalıyor (HR@1=0.512), POP kısmen (HR@1=0.097), Item-KNN ise
+tasarım gereği kör (HR@1=0.031). Bu bir kod hatası değil — RetailRocket için
+doğrulanmış, değiştirilmeden kullanılan mevcut davranış; LSApp'in kendine özgü
+bir bulgusu olarak not edildi.
 
 ### 4.3 İlgili çalışma (K3 için doğrudan karşılaştırma noktası)
 

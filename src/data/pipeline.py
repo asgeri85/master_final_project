@@ -1,6 +1,8 @@
-"""Orchestrates the RetailRocket preprocessing pipeline (A1-A4).
+"""Orchestrates the A1-A4 preprocessing pipeline for RetailRocket and LSApp.
 
-CLI usage: python -m src.data.pipeline --config configs/retailrocket_preprocess.yaml
+CLI usage:
+  python -m src.data.pipeline --config configs/retailrocket_preprocess.yaml
+  python -m src.data.pipeline --config configs/lsapp_preprocess.yaml
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from pathlib import Path
 from src.data.coldstart import add_cold_start_flag
 from src.data.config import PreprocessConfig, load_config
 from src.data.filter import iteratively_filter
-from src.data.io import read_raw_events, write_split
+from src.data.io import read_raw_events, read_raw_events_lsapp, write_item_mapping, write_split
 from src.data.report import build_report, print_report
 from src.data.sessionize import build_sessions
 from src.data.split import time_based_split
@@ -22,7 +24,12 @@ def run_pipeline(config: PreprocessConfig) -> dict:
     """Run the full preprocessing pipeline and return the summary report."""
     funnel: dict[str, int] = {}
 
-    df = read_raw_events(config.dataset.raw_events_path)
+    if config.dataset.name == "lsapp":
+        df = read_raw_events_lsapp(config.dataset.raw_events_path)
+        item_id_to_app_name = df.attrs.get("item_id_to_app_name")
+    else:
+        df = read_raw_events(config.dataset.raw_events_path)
+        item_id_to_app_name = None
     funnel["raw_rows"] = len(df)
 
     df = df.drop_duplicates(
@@ -62,6 +69,11 @@ def run_pipeline(config: PreprocessConfig) -> dict:
     write_split(val, file_paths["val"], config.io.parquet_compression)
     write_split(test, file_paths["test"], config.io.parquet_compression)
 
+    if item_id_to_app_name is not None:
+        mapping_path = processed_dir / "item_id_to_app_name.json"
+        write_item_mapping(item_id_to_app_name, mapping_path)
+        file_paths["item_id_to_app_name"] = str(mapping_path)
+
     report = build_report(funnel, train, val, test, file_paths)
     if config.io.report_path:
         Path(config.io.report_path).write_text(
@@ -71,7 +83,7 @@ def run_pipeline(config: PreprocessConfig) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="RetailRocket preprocessing pipeline")
+    parser = argparse.ArgumentParser(description="RetailRocket/LSApp preprocessing pipeline")
     parser.add_argument("--config", required=True, help="Path to preprocessing YAML config")
     args = parser.parse_args()
 

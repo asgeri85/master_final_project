@@ -1,0 +1,27 @@
+dataset:
+  name: lsapp
+  raw_events_path: data/raw/lsapp/lsapp.tsv
+  processed_dir: data/processed/lsapp
+
+session:
+  event_filter: Opened # A0-LSApp (confirmed with user, Hafta 4): only app-open events
+    # count as interactions -- analogous to RetailRocket's event_filter=view.
+    # LSApp's raw event_type also has Closed/User Interaction/Broken, dropped here.
+  gap_minutes: 30 # A1
+
+filtering:
+  min_session_length: 2 # A2
+  min_item_frequency: 5 # A2
+
+split:
+  test_days: 7 # A3
+  val_days: 7 # A3
+  bucket_by: session_start # A3
+
+cold_start:
+  enabled: true # A4
+  reference_split: train
+
+io:
+  parquet_compression: snappy
+  report_path: data/processed/lsapp/preprocessing_report.json
