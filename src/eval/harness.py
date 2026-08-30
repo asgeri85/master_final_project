@@ -10,7 +10,7 @@ from collections.abc import Iterator
 
 import pandas as pd
 
-from src.eval.metrics import average_at_k
+from src.eval.metrics import average_at_k, evaluate_pair
 
 
 def iter_session_prefixes(split_df: pd.DataFrame) -> Iterator[dict]:
@@ -51,6 +51,51 @@ def evaluate_model(model, split_df: pd.DataFrame, k: int = 10) -> dict[str, floa
             yield model.predict(context), true_item
 
     return average_at_k(pairs(), k)
+
+
+def evaluate_per_pair_and_session(
+    model, split_df: pd.DataFrame, k: int = 10, batched: bool = False
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Per-(session, prefix) HR/NDCG/MRR@K, both ungrouped (one row per prefix --
+    its unweighted mean equals average_at_k/evaluate_model's prefix-weighted metric,
+    the number every run_*.py script logs to results/runs.jsonl) and grouped to
+    per-session means (the input a session-level paired Wilcoxon signed-rank test
+    needs, karar-notu SS6 -- unweighted mean of THIS differs from the prefix-weighted
+    one whenever session length correlates with the metric, which is expected and
+    not a reproducibility bug).
+
+    batched=False calls model.predict(items) once per prefix (cheap deterministic
+    models: Item-KNN, S-POP, POP). batched=True collects every prefix's context
+    first and calls model.predict_many(contexts) once (GRU4Rec/LSTM/SASRec -- avoids
+    tens of thousands of unbatched single-session GPU forward passes, same
+    motivation as the run_*.py scripts' _evaluate_fast).
+    """
+    if batched:
+        contexts, session_ids, true_items = [], [], []
+        for ctx in iter_session_prefixes(split_df):
+            contexts.append(ctx["items"])
+            session_ids.append(ctx["session_id"])
+            true_items.append(ctx["true_item"])
+        ranked_lists = model.predict_many(contexts)
+        rows = [
+            {"session_id": sid, **evaluate_pair(ranked, true_item, k)}
+            for sid, ranked, true_item in zip(session_ids, ranked_lists, true_items)
+        ]
+    else:
+        rows = []
+        for ctx in iter_session_prefixes(split_df):
+            ranked = model.predict(ctx["items"])
+            rows.append({"session_id": ctx["session_id"], **evaluate_pair(ranked, ctx["true_item"], k)})
+
+    per_pair = pd.DataFrame(rows)
+    per_session = per_pair.groupby("session_id").mean(numeric_only=True)
+    return per_pair, per_session
+
+
+def per_session_metrics(model, split_df: pd.DataFrame, k: int = 10, batched: bool = False) -> pd.DataFrame:
+    """Per-session means only -- see evaluate_per_pair_and_session for details."""
+    _, per_session = evaluate_per_pair_and_session(model, split_df, k=k, batched=batched)
+    return per_session
 
 
 def count_eval_pairs(split_df: pd.DataFrame) -> int:

@@ -27,6 +27,7 @@ from scipy.stats import wilcoxon
 
 from src.eval.harness import iter_session_prefixes
 from src.eval.metrics import evaluate_pair
+from src.eval.stats import holm_bonferroni
 from src.features.build_candidate_table import build_candidate_table
 from src.features.feature_builder import FEATURE_COLUMNS, RAW_FEATURE_COLUMNS, FeatureBuilder
 from src.models.item_knn import ItemKnnModel
@@ -116,20 +117,6 @@ def _tune(
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=seed))
     study.optimize(objective, n_trials=config["optuna"]["n_trials"])
     return study.best_params, study.best_value
-
-
-def _holm_bonferroni(pvalues: list[float]) -> list[float]:
-    """Holm-Bonferroni step-down correction. Returns adjusted p-values in the
-    original input order."""
-    m = len(pvalues)
-    order = sorted(range(m), key=lambda i: pvalues[i])
-    adjusted = [0.0] * m
-    running_max = 0.0
-    for rank, i in enumerate(order):
-        candidate = (m - rank) * pvalues[i]
-        running_max = max(running_max, candidate)
-        adjusted[i] = min(running_max, 1.0)
-    return adjusted
 
 
 def run_ablation() -> dict:
@@ -222,7 +209,7 @@ def run_ablation() -> dict:
 
     hr_stat, hr_p = wilcoxon(rich_aligned[f"hr@{k}"], raw_aligned[f"hr@{k}"])
     ndcg_stat, ndcg_p = wilcoxon(rich_aligned[f"ndcg@{k}"], raw_aligned[f"ndcg@{k}"])
-    adjusted = _holm_bonferroni([hr_p, ndcg_p])
+    adjusted = holm_bonferroni([hr_p, ndcg_p])
 
     test_result = {
         "n_sessions": int(len(common_sessions)),
