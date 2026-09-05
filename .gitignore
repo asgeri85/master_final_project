@@ -1,4 +1,5 @@
 data/raw/
+checkpoints/
 *.parquet
 .kaggle/
 .venv/

@@ -1,0 +1,22 @@
+dataset: retailrocket
+data:
+  train_path: data/processed/retailrocket/train.parquet
+  val_path: data/processed/retailrocket/val.parquet
+eval:
+  k: 10
+checkpoints:
+  gru4rec: checkpoints/gru4rec/seed_42/gru4rec_seed42_best.pt
+  lstm: checkpoints/lstm/seed_42/lstm_seed42_best.pt
+  sasrec: checkpoints/sasrec/seed_42/sasrec_seed42_best.pt # opsiyonel, dönüşüm zorsa best-effort (karar notu §9)
+seed: 42 # karar notu §6a: tek-model derin karşılaştırmalar için proje genelinde kabul edilen temsili seed
+models: [gru4rec, lstm, sasrec]
+variants: [fp32, dynamic_int8, full_int8]
+export:
+  max_seq_len: 50 # configs/gru4rec.yaml / lstm.yaml training.max_seq_len ile eşleşmeli
+  onnx_opset: 17
+representative_dataset:
+  sample_size: 200
+  sample_seed: 42
+baseline_reproduction_tolerance: 0.01 # runs.jsonl seed=42 satırıyla karşılaştırma toleransı (h1_hypothesis_report.md'deki ile aynı yöntem)
+output_dir: results/ondevice
+report_path: results/ondevice_conversion_report.md
