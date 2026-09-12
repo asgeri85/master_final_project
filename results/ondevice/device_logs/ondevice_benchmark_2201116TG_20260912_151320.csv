@@ -1,0 +1,5 @@
+model,variant,p50_ms,p95_ms,peak_memory_mb,model_size_mb,device_name,android_version
+gru4rec,fp32,2.844,3.737,55.997,28.135,2201116TG,13
+gru4rec,dynamic_int8,1.252,3.105,39.896,7.826,2201116TG,13
+lstm,fp32,8.912,16.673,133.499,66.966,2201116TG,13
+lstm,dynamic_int8,2.648,2.997,57.442,17.535,2201116TG,13
