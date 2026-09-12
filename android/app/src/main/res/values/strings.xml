@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">OndeviceBench</string>
+    <string name="start_button">Ölçümü Başlat</string>
+</resources>

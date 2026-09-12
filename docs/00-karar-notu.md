@@ -392,6 +392,8 @@ Kural: her deney `runs.jsonl`'e satır ekler; config YAML'da, koda hiperparametr
 `.gitignore`'da genel `*.parquet` engeli var ama `results/*.parquet` için istisna tanımlı
 (analiz ara çıktıları versiyon kontrolünde tutulur, ham veri tutulmaz).
 
+Not (Aşama 2 eki, §12c): `android/` — Android benchmark uygulaması, repo kökünde.
+
 ## 12f. `CLAUDE.md` ve prompt kütüphanesi `[KİLİTLİ — Adım 6]`
 
 `CLAUDE.md` ve `prompt-kutuphanesi.md` dosyaları oluşturuldu. İçerik: kesin kurallar,

@@ -7,3 +7,12 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 !results/*.parquet
+
+# Android (android/)
+android/**/build/
+android/.gradle/
+android/local.properties
+android/**/*.iml
+android/.idea/
+android/app/src/main/assets/*.tflite
+android/app/src/main/assets/*.json
