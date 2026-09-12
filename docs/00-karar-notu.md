@@ -5,8 +5,8 @@
 > kapalıdır; `[AÇIK]` olanlar ilgili adımda netleşecektir.
 >
 > **Konum:** `docs/00-karar-notu.md`
-> **Son güncelleme:** 30 Ağustos 2026
-> **Durum:** Hafta 3 tamamlandı (H1 testi dahil), Hafta 4'e geçiliyor
+> **Son güncelleme:** 12 Eylül 2026
+> **Durum:** Hafta 4 tamamlandı (LSApp replikasyonu + on-device fizibilite dahil). Kod/deney aşaması bitti, tez yazımına geçiliyor.
 
 ---
 
@@ -116,53 +116,8 @@ on-device deneyleri için ayrıca avantaj.
 
 **Bilinen sınırı:** 87 öğelik aday uzayı. Bölüm 3'teki K düzeltmesi bu yüzden zorunlu.
 
-**Durum:** Ön işleme tamamlandı — Hafta 4, `data/processed/lsapp/{train,val,test}.parquet`.
-POP/S-POP/Item-KNN sonuçları `results/runs.jsonl`'e eklendi (`dataset: "lsapp"`).
-GRU4Rec/LSTM/SASRec configleri (`configs/{gru4rec,lstm,sasrec}_lsapp.yaml`) Colab'da
-çalıştırılmaya hazır, henüz eğitilmedi.
-
-### 4.2a LSApp ön işleme uygulaması `[TAMAMLANDI — Hafta 4]`
-
-**Tar-header teşhisi (Hafta 1'de tespit edildi):** `lsapp.tsv` aslında ham bir TSV
-değil, tek üyeli geçerli bir POSIX tar arşivi — ilk 512 byte standart tar header,
-gerçek TSV içeriği byte 512'den başlıyor (3.658.589 satır, `user_id, session_id,
-timestamp, app_name, event_type`, tab-delimited). Düzeltme diske ekstra kopya
-yazmadan `tarfile` ile stream edilerek yapıldı (`src.data.io.read_raw_events_lsapp`).
-
-**A0-LSApp — Event filtresi (kullanıcı ile netleştirildi):** Ham `event_type`
-sütununun 4 değeri var: `Opened`, `Closed`, `User Interaction`, `Broken`. RetailRocket'ın
-`event_filter: view` kararına analog olarak, LSApp'te **sadece `Opened`** satırları
-etkileşim sayıldı (bir sonraki-uygulama tahmini literatüründeki standart birim).
-Bu, ham 3.658.589 satırı 652.859'a indiriyor.
-
-**Not — makale ile satır sayısı farkı:** Makalenin bildirdiği 599.635 "olay" ile ham
-dosyadaki 3.658.589 satır arasında ~6x fark var; bu, ham logun `Opened`/`Closed`/
-`User Interaction` geçişlerini ayrı ayrı kaydetmesinden kaynaklanıyor gibi görünüyor
-(her uygulama ziyareti birden fazla satır üretiyor). `Opened`-only filtreleme sonrası
-652.859 satır, makalenin rakamına RetailRocket'taki "view"-only filtrelemeyle
-benzer bir mertebede yakın.
-
-**Oturum tanımı:** Ham `session_id` sütunu (global bir sayaç, kullanıcıya özel
-değil) kullanılmadı — RetailRocket ile tutarlılık için A1 (30 dk boşluk) ile
-`sessionize.build_sessions` tarafından sıfırdan yeniden inşa edildi.
-
-**itemid = app_name:** 87 uygulama adı, alfabetik sıralı deterministik bir eşlemeyle
-(0-86) `itemid`'e çevrildi. Eşleme `data/processed/lsapp/item_id_to_app_name.json`
-olarak saklanıyor (yorumlanabilirlik için).
-
-**Filtreleme hunisi (A1-A4 sonrası):** 652.859 satır → 15.666 oturum (2 iterasyonda
-yakınsadı) → train 571.329 satır / 13.891 oturum, val 57.379 satır / 1.254 oturum,
-test 22.187 satır / 521 oturum. Val/test'te cold-start oranı %0 (87 öğelik katalog
-zaten train'de tam kapsanıyor).
-
-**Gözlem — Item-KNN, LSApp'te POP'un altında kalıyor:** `src/models/item_knn.py`
-kendi-benzerliği kasıtlı olarak sıfırlıyor (`cooccurrence.setdiag(0)`) — RetailRocket'ta
-mantıklı bir tasarım (az önce görülen ürünü tekrar önermek anlamsız), ama LSApp'in
-baskın sinyali tam olarak bu: kullanıcı az önce kullandığı uygulamayı tekrar açıyor.
-S-POP bunu doğrudan yakalıyor (HR@1=0.512), POP kısmen (HR@1=0.097), Item-KNN ise
-tasarım gereği kör (HR@1=0.031). Bu bir kod hatası değil — RetailRocket için
-doğrulanmış, değiştirilmeden kullanılan mevcut davranış; LSApp'in kendine özgü
-bir bulgusu olarak not edildi.
+**Durum:** Henüz işlenmedi — Hafta 4'te ele alınacak. `lsapp.tsv` dosyasında ham tar
+header sorunu var (Hafta 1'de tespit edildi, düzeltilmesi Hafta 4'e bırakıldı).
 
 ### 4.3 İlgili çalışma (K3 için doğrudan karşılaştırma noktası)
 
@@ -285,18 +240,43 @@ için SoC, RAM, Android sürümü tablolaştırılır. En az üç segment hedefl
 
 ---
 
-## 8. On-device protokolü (K3) `[AÇIK — Hafta 4'te yapılacak]`
+## 8. On-device protokolü (K3) `[TAMAMLANDI — 12 Eylül 2026]`
 
-Ön kararlar:
+### 8a. Dönüşüm sonuçları (RetailRocket, seed=42, validation)
 
-- **Runtime:** LiteRT (eski adıyla TensorFlow Lite) — birincil aday
-- **Dönüşüm:** FP32 → dinamik menzilli INT8 → tam tamsayı INT8 (üç varyant karşılaştırılır)
-- **Aday modeller:** GRU4Rec ve LSTM birincil; SASRec ikincil (dönüşüm zorluğu yüksek)
-- **Ölçüm:** cihaz başına en az 200 çıkarım, ilk 20 ısınma koşusu atılır, p50/p95 raporlanır
-- **Termal kontrol:** ölçümler arasında cihaz soğuması beklenir; termal kısıtlama (throttling) sonuçları bozar
+| Model | Varyant | Boyut | NDCG@10 kaybı | Not |
+|---|---|---|---|---|
+| GRU4Rec | FP32 | 28.135 MB | — (referans) | |
+| GRU4Rec | Dinamik INT8 | 7.826 MB | %0.00 | ONNX↔PyTorch max fark 5.72e-06 |
+| GRU4Rec | Tam INT8 | — | — | **Dönüşüm başarısız** — TFLite RESHAPE hatası (embedding katmanı kuantizasyon uyumsuzluğu) |
+| LSTM | FP32 | 66.966 MB | — (referans) | |
+| LSTM | Dinamik INT8 | 17.535 MB | %0.06 | ONNX↔PyTorch max fark 9.54e-06 |
+| LSTM | Tam INT8 | — | — | **Dönüşüm başarısız** — aynı RESHAPE hatası |
+| SASRec | — | — | — | **Dönüşüm başarısız** — `nn.MultiheadAttention` mask-broadcasting, ONNX→TFLite köprüsünde `Expand` hatası. Planlandığı gibi feda edildi (§9 feda sırası). |
 
-Netleşmesi gerekenler: gömme (embedding) katmanının kuantizasyon davranışı, katalog
-boyutunun model boyutuna etkisi, ölçüm harness'ının nasıl kurulacağı.
+**Sonuç:** Dinamik INT8 kuantizasyon, tam tamsayı INT8'in aksine, mevcut araç zincirinde (ONNX→TFLite) sorunsuz çalışıyor ve pratik olarak sıfır doğruluk kaybıyla ciddi boyut/hız kazancı sağlıyor. Tam INT8 ve SASRec'in başarısızlığı tez metninde sınırlılık olarak raporlanacak — embedding katmanı büyüklüğü ve attention mekanizmasının mevcut TFLite dönüştürücüsüyle uyumsuzluğu, teknik bir bulgu.
+
+### 8b. Gerçek cihaz ölçüm sonuçları
+
+| Cihaz | SoC | RAM | Android | Segment |
+|---|---|---|---|---|
+| Xiaomi 2201116TG (Redmi Note 11 4G) | MediaTek Helio G96 | 8GB | 13 | Orta |
+| OPPO CPH2687 | Qualcomm Snapdragon (bengal, 400 serisi) | 8GB | 16 | Giriş/Orta |
+
+**Sınırlılık:** Üst segment cihaza erişim olmadı; iki orta/giriş segment cihazla devam edildi. Bu, tez metninde açıkça belirtilecek bir kapsam sınırlılığıdır (§7'deki "en az üç segment" hedefine kısmen ulaşıldı).
+
+| Model/Varyant | Xiaomi p50 (ms) | OPPO p50 (ms) |
+|---|---|---|
+| GRU4Rec FP32 | 2.844 | 3.669 |
+| GRU4Rec Dinamik INT8 | 1.252 | 1.357 |
+| LSTM FP32 | 8.912 | 8.417 |
+| LSTM Dinamik INT8 | 2.648 | 3.293 |
+
+**Bulgu:** Dinamik INT8, her iki cihazda da tutarlı şekilde ~2-3x gecikme azalması sağlıyor (tek cihaza özgü bir tesadüf değil). Bu, K3'ün ana iddiasının (kuantize modellerin mobilde pratik olarak kullanılabilir olduğu, doğruluktan neredeyse ödün vermeden) somut kanıtı.
+
+**Ölçüm metodolojisi (uygulanan):** 20 ısınma + 200 ölçülen çıkarım, System.nanoTime() ile p50/p95, Debug.getNativeHeapAllocatedSize() ile tepe bellek. Emülatörde fonksiyonel doğrulama yapıldı (XNNPACK SIGILL hatası tespit edildi — emülatöre özgü, gerçek cihazlarda hiç görülmedi), emülatör gecikme verisi teze dahil edilmedi (protokol kuralı).
+
+**Kayıtlı dosyalar:** `results/ondevice_conversion_report.md`, `results/ondevice/device_logs/*.csv`, `android/` (Kotlin benchmark uygulaması kaynak kodu)
 
 ---
 
@@ -307,7 +287,16 @@ boyutunun model boyutuna etkisi, ölçüm harness'ının nasıl kurulacağı.
 | **1** | 3–9 Ağu | Veri indirme, EDA, ön işleme pipeline, zaman-temelli split, değerlendirme harness'ı, Katman 0–1 | ✅ Tamamlandı |
 | **2** | 10–16 Ağu | Özellik mühendisliği, RF + XGBoost, H2 ablasyonu | ✅ Tamamlandı, H2 doğrulandı |
 | **3** | 17–30 Ağu | GRU4Rec, LSTM, SASRec + Optuna, H1 testi | ✅ Tamamlandı, H1 doğrulandı (planlanandan biraz uzun sürdü — Colab GPU optimizasyonu ve altyapı sorunları nedeniyle) |
-| **4** | 31 Ağu – 1 Eyl | LSApp replikasyonu, on-device dönüşüm ve ölçüm, final tablo/grafikler | 🔜 **Sırada** |
+| **4** | 31 Ağu – 12 Eyl | LSApp replikasyonu, on-device dönüşüm ve ölçüm | ✅ Tamamlandı (final tablo/grafikler tez yazımı sırasında derlenecek) |
+
+### Hafta 4 tamamlanan alt görevler
+
+- LSApp ön işleme (tar-header ve timestamp birim hatası düzeltmeleri dahil) ✅
+- LSApp baseline modeller (POP, S-POP, Item-KNN) ✅ — Item-KNN'in POP'un altında kalması, `setdiag(0)` tasarımının LSApp'in "az önce kullanılanı tekrar aç" örüntüsüne kör kalmasıyla açıklandı
+- LSApp derin modeller (GRU4Rec, LSTM, SASRec, 5 seed) ✅ — burada SASRec en zayıf derin model çıktı (RetailRocket'ın tersi), GRU4Rec/LSTM birbirine çok yakın
+- On-device dönüşüm (§8a) ✅
+- On-device gerçek cihaz ölçümü (§8b) ✅ — iki cihazla (üst segment olmadan)
+- LSApp'te H1 testi tekrarı — **yapılmadı**, zorunlu değildi, opsiyonel sağlamlık kontrolü olarak kaldı
 
 ### Geride kalınırsa feda sırası
 
@@ -391,8 +380,6 @@ thesis-project/
 Kural: her deney `runs.jsonl`'e satır ekler; config YAML'da, koda hiperparametre gömülmez.
 `.gitignore`'da genel `*.parquet` engeli var ama `results/*.parquet` için istisna tanımlı
 (analiz ara çıktıları versiyon kontrolünde tutulur, ham veri tutulmaz).
-
-Not (Aşama 2 eki, §12c): `android/` — Android benchmark uygulaması, repo kökünde.
 
 ## 12f. `CLAUDE.md` ve prompt kütüphanesi `[KİLİTLİ — Adım 6]`
 
