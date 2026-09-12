@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.view.View
 import android.widget.Button
 import android.widget.TextView
+import java.util.Locale
 
 /** Basit, tek seferlik kullanım için tasarlanmış ölçüm uygulaması (karar notu
  * §12c) -- production kalitesinde olması gerekmiyor, sadece güvenilir ölçüm
@@ -60,9 +61,12 @@ class MainActivity : Activity() {
     }
 
     private fun formatResults(results: List<BenchmarkResult>): String {
-        val header = String.format("%-8s %-13s %8s %8s %9s %9s", "model", "variant", "p50_ms", "p95_ms", "peak_mb", "size_mb")
+        // Locale.US: bkz. CsvExporter.buildCsv -- aynı ondalık-ayıraç sorunu ekran
+        // metninde de oluşur (cihaz Türkçe locale'de "2,62" gösterir).
+        val header = String.format(Locale.US, "%-8s %-13s %8s %8s %9s %9s", "model", "variant", "p50_ms", "p95_ms", "peak_mb", "size_mb")
         val rows = results.joinToString("\n") { r ->
             String.format(
+                Locale.US,
                 "%-8s %-13s %8.2f %8.2f %9.2f %9.2f",
                 r.model, r.variant, r.p50Ms, r.p95Ms, r.peakMemoryMb, r.modelSizeMb,
             )

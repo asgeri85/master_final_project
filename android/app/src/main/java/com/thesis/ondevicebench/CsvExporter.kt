@@ -36,14 +36,19 @@ object CsvExporter {
     }
 
     private fun buildCsv(results: List<BenchmarkResult>): String {
+        // Locale.US zorunlu: cihaz varsayılan locale'i ondalık ayıraç olarak virgül
+        // kullanıyorsa (ör. Türkçe), "%.3f".format(...) CSV'nin virgülle ayrılmış
+        // kolon yapısını bozar (bkz. ilk fiziksel cihaz denemesi -- "2,618" iki
+        // kolona bölünüyordu).
+        fun fmt(value: Double) = String.format(Locale.US, "%.3f", value)
         val rows = results.joinToString("\n") { r ->
             listOf(
                 r.model,
                 r.variant,
-                "%.3f".format(r.p50Ms),
-                "%.3f".format(r.p95Ms),
-                "%.3f".format(r.peakMemoryMb),
-                "%.3f".format(r.modelSizeMb),
+                fmt(r.p50Ms),
+                fmt(r.p95Ms),
+                fmt(r.peakMemoryMb),
+                fmt(r.modelSizeMb),
                 r.deviceName,
                 r.androidVersion,
             ).joinToString(",")
