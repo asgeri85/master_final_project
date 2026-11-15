@@ -29,10 +29,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 import yaml
 from scipy.stats import wilcoxon
 
-from src.eval.harness import count_eval_pairs, evaluate_model_multi, evaluate_per_pair_and_session
+from src.eval.harness import count_eval_pairs, evaluate_model_multi, evaluate_per_pair_and_session, iter_eval_pairs
+from src.eval.metrics import average_multi
 from src.eval.run_baselines import _build_model as build_baseline, _git_commit
 from src.eval.run_h1_hypothesis import apply_holm_bonferroni, run_pairwise_tests
 from src.eval.run_h2_ablation import _per_session_metrics as xgb_per_session
@@ -42,7 +44,6 @@ from src.features.feature_builder import FeatureBuilder
 from src.models.item_knn import ItemKnnModel
 from src.models.pop import PopModel
 from src.models.xgboost_ranker import XGBoostRankerModel
-from src.ondevice.evaluate_conversion import _PyTorchNetRecommender
 from src.ondevice.export_onnx import build_net, get_vocab, load_checkpoint
 
 RUNS_PATH = Path("results/runs.jsonl")
@@ -55,6 +56,56 @@ DATASETS = {
     "retailrocket": {"suffix": "", "specs": [("hr", 10), ("ndcg", 10), ("mrr", 10)], "report": "results/test_set_report.md"},
     "lsapp": {"suffix": "_lsapp", "specs": [("hr", 1), ("hr", 3), ("mrr", 5)], "report": "results/test_set_report_lsapp.md"},
 }
+
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+class _TopKRecommender:
+    """Checkpoint net -> ranked top-K lists, batched on DEVICE.
+
+    Same scoring as Gru4RecModel/LstmModel/SasrecModel.predict_many (same encode/project,
+    cold-start fallback to POP, tie-break score desc / item id asc), but only the first K
+    positions of the ranking are materialised. HR/NDCG/MRR@K for K <= self.k depend on
+    nothing else, so metrics are unchanged; it avoids building a full-catalog Python list
+    per prefix (the original path took ~350 s per model on an A100 and gigabytes of RAM).
+    """
+
+    def __init__(self, net, item_to_idx, idx_to_item, max_seq_len, pop, k):
+        self.net = net.to(DEVICE).eval()
+        self.item_to_idx = item_to_idx
+        self.idx_to_item = np.asarray(idx_to_item)
+        self.max_seq_len = max_seq_len
+        self._pop = pop
+        self.k = k
+
+    def predict_many(self, sessions, eval_batch_size: int = 512):
+        results = [None] * len(sessions)
+        idx, known_all = [], []
+        for i, session in enumerate(sessions):
+            known = [it for it in session if it in self.item_to_idx]
+            if not known:
+                results[i] = self._pop.predict(session)[: self.k]
+                continue
+            idx.append(i)
+            known_all.append(known[-self.max_seq_len:])
+        with torch.no_grad():
+            for start in range(0, len(known_all), eval_batch_size):
+                chunk = known_all[start:start + eval_batch_size]
+                lengths = torch.tensor([len(c) for c in chunk], dtype=torch.long)  # CPU (pack_padded_sequence)
+                x = torch.zeros((len(chunk), int(lengths.max())), dtype=torch.long)
+                for r, c in enumerate(chunk):
+                    x[r, :len(c)] = torch.tensor([self.item_to_idx[it] for it in c], dtype=torch.long)
+                x = x.to(DEVICE)
+                hidden = self.net.encode(x, lengths)
+                last = hidden[torch.arange(len(chunk), device=DEVICE), lengths.to(DEVICE) - 1]
+                scores = self.net.project(last)[:, 1:]
+                top_s, top_i = torch.topk(scores, self.k, dim=1)
+                top_s, top_i = top_s.cpu().numpy(), top_i.cpu().numpy()
+                for r, i in enumerate(idx[start:start + eval_batch_size]):
+                    items = self.idx_to_item[top_i[r]]
+                    results[i] = items[np.lexsort((items, -top_s[r]))].tolist()
+        return results
 
 
 def _load_runs() -> list[dict]:
@@ -80,6 +131,9 @@ def _eval(model, split_df, specs, dataset, batched):
     if dataset == "retailrocket":
         per_pair, per_session = evaluate_per_pair_and_session(model, split_df, k=10, batched=batched)
         return _metrics(per_pair, specs), per_session
+    if batched:
+        contexts, true_items = zip(*iter_eval_pairs(split_df))
+        return average_multi(zip(model.predict_many(list(contexts)), true_items), specs), None
     return evaluate_model_multi(model, split_df, specs), None
 
 
@@ -119,22 +173,24 @@ def run_deep(dataset, train, val, test, specs, runs, ckpt_root):
             if not path.exists():
                 print(f"  [atlandı] {path} yok")
                 continue
+            t0 = time.monotonic()
             payload = load_checkpoint(path)
             item_to_idx, idx_to_item = get_vocab(payload)
             net = build_net(name, payload, len(idx_to_item))
-            model = _PyTorchNetRecommender(net, item_to_idx, idx_to_item, payload["hyperparameters"]["max_seq_len"], pop)
+            model = _TopKRecommender(net, item_to_idx, idx_to_item, payload["hyperparameters"]["max_seq_len"], pop,
+                                     k=max(k for _, k in specs))
 
             logged = _logged_val(runs, dataset, name, run_type="seed", seed=seed)["metrics"]
             val_metrics, _ = _eval(model, val, specs, dataset, batched=True)
             deltas = {m: abs(val_metrics[m] - logged[m]) for m in val_metrics}
             ok = max(deltas.values()) <= VAL_TOLERANCE
             checks.append({"model": name, "seed": seed, "max_abs_delta_vs_logged_val": max(deltas.values()), "ok": ok})
-            print(f"  {name} seed={seed}: val kontrolü max|Δ|={max(deltas.values()):.2e} {'OK' if ok else 'BAŞARISIZ'}")
+            print(f"  {name} seed={seed}: val kontrolü max|Δ|={max(deltas.values()):.2e} {'OK' if ok else 'BAŞARISIZ'}", flush=True)
             if not ok:
                 raise RuntimeError(f"{path}: checkpoint kayıtlı val sonucunu üretmiyor ({deltas}); test yazılmadı.")
 
             metrics, ps = _eval(model, test, specs, dataset, batched=True)
-            print(f"  {name} seed={seed} test: {metrics}")
+            print(f"  {name} seed={seed} test: {metrics}  ({time.monotonic() - t0:.0f}s)", flush=True)
             per_seed.append({"seed": seed, "metrics": metrics})
             if seed == H1_SEED and ps is not None:
                 per_session[name] = ps
@@ -243,6 +299,7 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="print only; do not write results/")
     args = parser.parse_args()
 
+    print(f"Cihaz: {DEVICE}", flush=True)
     runs = _load_runs()
     if any(r.get("split") == "test" and r["dataset"] == args.dataset for r in runs) and not args.dry_run:
         raise SystemExit(f"runs.jsonl zaten {args.dataset} için test satırı içeriyor; tekrar eklenmedi.")
