@@ -249,16 +249,21 @@ def run_deep(dataset, train, val, test, specs, runs, ckpt_root):
 def run_xgboost(train, test, runs):
     """H2 setup on test: same candidate pool, same logged best params, session-level unit."""
     base = _logged_val(runs, "retailrocket", "xgboost_raw")["config"]
+    t0 = time.monotonic()
+    print("  [xgb] Item-KNN ve öznitelik oluşturucu fit ediliyor...", flush=True)
     item_knn = ItemKnnModel(neighborhood_size=base["candidate_generation"]["item_knn_neighborhood_size"])
     item_knn.fit(train)
     feature_builder = FeatureBuilder()
     feature_builder.fit(train)
+    print(f"  [xgb] fit bitti ({time.monotonic() - t0:.0f}s); aday tablosu üretiliyor (dakikalar sürebilir)...", flush=True)
     table = build_candidate_table(item_knn, feature_builder, train,
                                   n_candidates=base["candidate_generation"]["n_candidates"], include_label=True,
                                   negatives_per_positive=base["training"]["negatives_per_positive"],
                                   random_seed=base["training"]["random_seed"])
+    print(f"  [xgb] aday tablosu hazır ({time.monotonic() - t0:.0f}s, {len(table)} satır)", flush=True)
     rows, per_session = [], {}
     for fs in ("raw", "rich"):
+        print(f"  [xgb] {fs}: eğitim ve test değerlendirmesi...", flush=True)
         config = _logged_val(runs, "retailrocket", f"xgboost_{fs}")["config"]
         model = XGBoostRankerModel(item_knn=item_knn, feature_builder=feature_builder, feature_set=fs,
                                    xgb_params=config["optuna_best_params"],
