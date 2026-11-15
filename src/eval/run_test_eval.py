@@ -148,6 +148,32 @@ def _row(model, dataset, metrics, n_pairs, config, seed=None, run_type=None, ext
     return row
 
 
+def _recover_best_from_epochs(ckpt_dir: Path, name: str, seed: int):
+    """best.pt is empty/unreadable (Drive write failure) -> rebuild it from the per-epoch files.
+
+    _save_checkpoint stores `best_val_ndcg` (running best, updated BEFORE the save), so it is
+    non-decreasing over epochs and the best epoch is the first one whose value equals the
+    final maximum; that epoch's file holds exactly the best-on-val weights. Binary search
+    over the epoch files; the caller still re-scores the result on val against runs.jsonl.
+    """
+    files = sorted(ckpt_dir.glob(f"{name}_seed{seed}_epoch*.pt"))
+    files = [f for f in files if f.stat().st_size > 0]
+    if not files:
+        return None, None
+    final_best = load_checkpoint(files[-1])["best_val_ndcg"]
+    lo, hi = 0, len(files) - 1  # invariant: files[hi] reaches final_best
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if load_checkpoint(files[mid])["best_val_ndcg"] >= final_best:
+            hi = mid
+        else:
+            lo = mid + 1
+    payload = load_checkpoint(files[lo])
+    print(f"  [kurtarma] {name} seed={seed}: best.pt boş; en iyi epoch dosyası {files[lo].name} "
+          f"(best_val_ndcg={payload['best_val_ndcg']:.6f}) kullanılıyor", flush=True)
+    return payload, files[lo].name
+
+
 def run_classical(dataset, train, test, specs, runs):
     rows, per_session = [], {}
     for name in ("pop", "s_pop", "item_knn"):
@@ -170,11 +196,19 @@ def run_deep(dataset, train, val, test, specs, runs, ckpt_root):
         per_seed = []
         for seed in SEEDS:
             path = Path(ckpt_root) / f"{name}{DATASETS[dataset]['suffix']}" / f"seed_{seed}" / f"{name}_seed{seed}_best.pt"
-            if not path.exists():
-                print(f"  [atlandı] {path} yok")
-                continue
+            payload, source = None, "best_on_val"
+            if path.exists() and path.stat().st_size > 0:
+                try:
+                    payload = load_checkpoint(path)
+                except (EOFError, RuntimeError, OSError) as e:
+                    print(f"  [uyarı] {path.name} okunamadı ({type(e).__name__})", flush=True)
+            if payload is None:
+                payload, epoch_file = _recover_best_from_epochs(path.parent, name, seed)
+                if payload is None:
+                    print(f"  [atlandı] {path} yok/boş ve epoch dosyası bulunamadı", flush=True)
+                    continue
+                source = f"recovered_from_{epoch_file}"
             t0 = time.monotonic()
-            payload = load_checkpoint(path)
             item_to_idx, idx_to_item = get_vocab(payload)
             net = build_net(name, payload, len(idx_to_item))
             model = _TopKRecommender(net, item_to_idx, idx_to_item, payload["hyperparameters"]["max_seq_len"], pop,
@@ -183,15 +217,15 @@ def run_deep(dataset, train, val, test, specs, runs, ckpt_root):
             logged = _logged_val(runs, dataset, name, run_type="seed", seed=seed)["metrics"]
             val_metrics, _ = _eval(model, val, specs, dataset, batched=True)
             deltas = {m: abs(val_metrics[m] - logged[m]) for m in val_metrics}
-            ok = max(deltas.values()) <= VAL_TOLERANCE
-            checks.append({"model": name, "seed": seed, "max_abs_delta_vs_logged_val": max(deltas.values()), "ok": ok})
+            ok = max(deltas.values()) <= (VAL_TOLERANCE if source == "best_on_val" else 1e-3)
+            checks.append({"model": name, "seed": seed, "max_abs_delta_vs_logged_val": max(deltas.values()), "ok": ok, "source": source})
             print(f"  {name} seed={seed}: val kontrolü max|Δ|={max(deltas.values()):.2e} {'OK' if ok else 'BAŞARISIZ'}", flush=True)
             if not ok:
                 raise RuntimeError(f"{path}: checkpoint kayıtlı val sonucunu üretmiyor ({deltas}); test yazılmadı.")
 
             metrics, ps = _eval(model, test, specs, dataset, batched=True)
             print(f"  {name} seed={seed} test: {metrics}  ({time.monotonic() - t0:.0f}s)", flush=True)
-            per_seed.append({"seed": seed, "metrics": metrics})
+            per_seed.append({"seed": seed, "metrics": metrics, "source": source})
             if seed == H1_SEED and ps is not None:
                 per_session[name] = ps
 
@@ -201,7 +235,7 @@ def run_deep(dataset, train, val, test, specs, runs, ckpt_root):
         n_pairs = count_eval_pairs(test)
         for r in per_seed:
             rows.append(_row(name, dataset, r["metrics"], n_pairs, config, seed=r["seed"], run_type="seed",
-                             extra={"checkpoint_source": "best_on_val"}))
+                             extra={"checkpoint_source": r["source"]}))
         if len(per_seed) > 1:
             summary = {}
             for key in per_seed[0]["metrics"]:
@@ -259,8 +293,8 @@ def render_report(dataset, rows, checks, h1_rows, h2_rows) -> str:
              "Yeni eğitim ve hiperparametre araması yok. Derin modeller val üzerinde seçilmiş en iyi checkpoint'lerden "
              "yüklendi; klasik modeller ve XGBoost train üzerinde deterministik olarak yeniden fit edildi.", "",
              "## Checkpoint doğrulaması (val yeniden puanlama vs runs.jsonl)", "",
-             "| Model | Seed | max mutlak fark | Durum |", "|---|---|---|---|"]
-    lines += [f"| {c['model']} | {c['seed']} | {c['max_abs_delta_vs_logged_val']:.2e} | {'OK' if c['ok'] else 'HATA'} |" for c in checks]
+             "| Model | Seed | Kaynak | max mutlak fark | Durum |", "|---|---|---|---|---|"]
+    lines += [f"| {c['model']} | {c['seed']} | {c['source']} | {c['max_abs_delta_vs_logged_val']:.2e} | {'OK' if c['ok'] else 'HATA'} |" for c in checks]
     lines += ["", "## Test sonuçları", ""]
     keys = list(rows[0]["metrics"].keys())
     lines += ["| Model | Tür | Seed | n | " + " | ".join(keys) + " |", "|---|---|---|---|" + "---|" * len(keys)]
