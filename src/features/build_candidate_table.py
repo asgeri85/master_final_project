@@ -16,6 +16,9 @@ from src.features.feature_builder import FeatureBuilder
 from src.models.item_knn import ItemKnnModel
 
 
+_CONCAT_EVERY = 5000  # oncek sayisi; her bu kadarda bir parcayi birlestir
+
+
 def build_candidate_table(
     item_knn: ItemKnnModel,
     feature_builder: FeatureBuilder,
@@ -37,6 +40,7 @@ def build_candidate_table(
     """
     rng = np.random.default_rng(random_seed)
     frames = []
+    chunks = []
     query_id = 0
     for ctx in iter_session_prefixes(split_df):
         candidates = item_knn.top_candidates(ctx["items"], n=n_candidates)
@@ -56,8 +60,15 @@ def build_candidate_table(
 
         frames.append(features)
         query_id += 1
+        # Bellek: ~700k kucuk DataFrame'i listede tutmak tablonun kendisinden ~15x fazla RAM yer.
+        # Parca parca birlestir; satirlar ve siralari ayni kalir.
+        if len(frames) >= _CONCAT_EVERY:
+            chunks.append(pd.concat(frames, ignore_index=True))
+            frames = []
 
-    return pd.concat(frames, ignore_index=True)
+    if frames:
+        chunks.append(pd.concat(frames, ignore_index=True))
+    return pd.concat(chunks, ignore_index=True)
 
 
 def _subsample_negatives(
